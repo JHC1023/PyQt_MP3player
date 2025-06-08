@@ -1,10 +1,13 @@
 import sys
 import os
+import shutil
+import re
+import urllib.request
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QSlider, QLabel, QListWidget, QFileDialog, QDesktopWidget,
-                             QMenuBar, QAction, QLineEdit, QMessageBox)
+                             QMenuBar, QAction, QLineEdit, QMessageBox, QListWidgetItem)
 from PyQt5.QtCore import Qt, QTimer, QEvent
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import QStyle
 from mutagen.mp3 import MP3
 import pygame
@@ -50,6 +53,11 @@ class MP3Player(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to initialize YouTube API: {str(e)}")
             self.youtube = None
+
+        # ffmpeg 경로 설정
+        self.ffmpeg_path = self._get_ffmpeg_path()
+        if not self.ffmpeg_path:
+            QMessageBox.critical(self, "Error", "ffmpeg is not installed or path is incorrect. Please check ffmpeg installation.")
 
         self.download_dir = os.path.join(os.path.expanduser("~"), "Downloads", "MP3Player")
         if not os.path.exists(self.download_dir):
@@ -216,6 +224,41 @@ class MP3Player(QMainWindow):
         self.seek_slider.setObjectName("seek_slider")
         self.volume_slider.setObjectName("volume_slider")
 
+    def _get_ffmpeg_path(self):
+        """ffmpeg 실행 파일 경로 탐지"""
+        ffmpeg_path = shutil.which("ffmpeg")
+        if ffmpeg_path:
+            return os.path.dirname(ffmpeg_path)
+        custom_path = r"A:\Users\KimJoungMin\Documents\ffmpeg-2024-09-22-git-a577d313b2-full_build\bin"
+        if os.path.exists(os.path.join(custom_path, "ffmpeg.exe")):
+            return custom_path
+        return None
+
+    def _parse_title(self, title):
+        """유튜브 제목에서 아티스트와 곡명 분리"""
+        patterns = [
+            r'^(.*?)\s*-\s*(.*?)$',  # "아티스트 - 곡명"
+            r'^(.*?)\s*by\s*(.*?)$',  # "곡명 by 아티스트"
+            r'^(.*?)\s*\((.*?)\)$',  # "곡명 (아티스트)"
+            r'^(.*?)\s*[\|]\s*(.*?)$',  # "아티스트 | 곡명"
+        ]
+        for pattern in patterns:
+            match = re.match(pattern, title.strip(), re.IGNORECASE)
+            if match:
+                parts = match.groups()
+                if len(parts) == 2:
+                    # 첫 번째 그룹이 아티스트, 두 번째가 곡명 또는 반대일 수 있음
+                    artist, song = parts
+                    artist = artist.strip()
+                    song = song.strip()
+                    # 패턴에 따라 아티스트와 곡명 순서 조정
+                    if pattern == r'^(.*?)\s*by\s*(.*?)$' or pattern == r'^(.*?)\s*\((.*?)\)$':
+                        artist, song = song, artist
+                    if artist and song:
+                        return song, artist
+        # 파싱 실패 시 전체 제목을 곡명으로, 아티스트는 기본값
+        return title.strip(), "Unknown Artist"
+
     def setup_menus(self):
         file_menu = self.menu_bar.addMenu("파일")
         open_action = QAction("열기", self)
@@ -301,6 +344,9 @@ class MP3Player(QMainWindow):
         if not self.youtube:
             QMessageBox.critical(self, "Error", "YouTube API is not initialized.")
             return
+        if not self.ffmpeg_path:
+            QMessageBox.critical(self, "Error", "ffmpeg is not installed. Please install it first.")
+            return
         query = self.youtube_search_bar.text().strip()
         if not query:
             QMessageBox.warning(self, "Warning", "Please enter a search query.")
@@ -318,44 +364,65 @@ class MP3Player(QMainWindow):
             for item in response.get("items", []):
                 title = item["snippet"]["title"]
                 video_id = item["id"]["videoId"]
-                self.youtube_results.addItem(f"{title} [youtube.com/watch?v={video_id}]")
+                thumbnail_url = item["snippet"]["thumbnails"]["default"]["url"]
+                list_item = QListWidgetItem(f"{title} [youtube.com/watch?v={video_id}]")
+                list_item.setData(Qt.UserRole, thumbnail_url)
+                self.youtube_results.addItem(list_item)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to search YouTube: {str(e)}")
 
     def download_youtube(self, item):
+        if not self.ffmpeg_path:
+            QMessageBox.critical(self, "Error", "ffmpeg is not installed. Please install it first.")
+            return
         video_url = item.text().split("[")[-1].rstrip("]")
-        title = item.text().split("[")[0].strip()
+        full_title = item.text().split("[")[0].strip()
+        thumbnail_url = item.data(Qt.UserRole)
+        # 제목 파싱
+        title, artist = self._parse_title(full_title)
         # Sanitize title to avoid invalid filename characters
-        title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
-        threading.Thread(target=self.download_youtube_thread, args=(video_url, title), daemon=True).start()
+        sanitized_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
+        threading.Thread(target=self.download_youtube_thread, args=(video_url, sanitized_title, title, artist, thumbnail_url), daemon=True).start()
 
-    def download_youtube_thread(self, video_url, title):
+    def download_youtube_thread(self, video_url, sanitized_title, title, artist, thumbnail_url):
         ydl_opts = {
             'format': 'bestaudio/best',
-            'outtmpl': os.path.join(self.download_dir, f"{title}.%(ext)s"),
+            'outtmpl': os.path.join(self.download_dir, f"{sanitized_title}.%(ext)s"),
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
                 'preferredquality': '320',
             }],
-            'ffmpeg_location': 'ffmpeg',  # Adjust if ffmpeg is not in PATH
+            'ffmpeg_location': self.ffmpeg_path,
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([video_url])
-            mp3_path = os.path.join(self.download_dir, f"{title}.mp3")
+            mp3_path = os.path.join(self.download_dir, f"{sanitized_title}.mp3")
             if os.path.exists(mp3_path):
                 QApplication.postEvent(self, CustomEvent(f"Downloaded and added: {title}"))
-                self.add_downloaded_song(mp3_path, title)
+                self.add_downloaded_song(mp3_path, title, artist, thumbnail_url)
             else:
-                QApplication.postEvent(self, CustomEvent(f"Failed to find downloaded file: {title}"))
+                QApplication.postEvent(self, CustomEvent(f"Failed to find downloaded song: {title}"))
         except Exception as e:
             QApplication.postEvent(self, CustomEvent(f"Error downloading {title}: {str(e)}"))
 
-    def add_downloaded_song(self, file_name, title):
+    def add_downloaded_song(self, file_name, title, artist, thumbnail_url=None):
         self.playlist_songs.append(file_name)
-        self.all_songs.append((file_name, title))
-        self.playlist.addItem(title)
+        self.all_songs.append((file_name, title, artist, thumbnail_url))
+        self.playlist.addItem(f"{artist} - {title}")
+        if thumbnail_url:
+            try:
+                with urllib.request.urlopen(thumbnail_url) as response:
+                    image_data = response.read()
+                pixmap = QPixmap()
+                pixmap.loadFromData(image_data)
+                scaled_pixmap = pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self.thumbnail_label.setPixmap(scaled_pixmap)
+            except Exception:
+                self.thumbnail_label.setText("No Image")
+        else:
+            self.thumbnail_label.setText("No Image")
         self.update_song_info()
 
     def add_song(self):
@@ -363,10 +430,14 @@ class MP3Player(QMainWindow):
         for file_name in file_names:
             if file_name:
                 self.playlist_songs.append(file_name)
-                song = MP3(file_name)
-                title = song.get("TIT2", os.path.basename(file_name))
-                self.all_songs.append((file_name, str(title)))
-                self.playlist.addItem(str(title))
+                try:
+                    song = MP3(file_name)
+                    title = str(song.get("TIT2", os.path.basename(file_name)))
+                    artist = str(song.get("TPE1", "Unknown Artist"))
+                    self.all_songs.append((file_name, title, artist, None))
+                    self.playlist.addItem(f"{artist} - {title}")
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to add song: {str(e)}")
         if file_names:
             self.update_song_info()
 
@@ -378,7 +449,7 @@ class MP3Player(QMainWindow):
             index = self.playlist.row(item)
             self.playlist.takeItem(index)
             removed_song = self.playlist_songs.pop(index)
-            self.all_songs = [(path, title) for path, title in self.all_songs if path != removed_song]
+            self.all_songs = [(path, title, artist, thumb) for path, title, artist, thumb in self.all_songs if path != removed_song]
         if self.current_song not in self.playlist_songs:
             self.current_song = None
             self.stop()
@@ -389,10 +460,10 @@ class MP3Player(QMainWindow):
         search_text = self.search_bar.text().lower()
         self.playlist.clear()
         self.playlist_songs.clear()
-        for file_name, title in self.all_songs:
-            if search_text in title.lower():
+        for file_name, title, artist, thumbnail_url in self.all_songs:
+            if search_text in title.lower() or search_text in artist.lower():
                 self.playlist_songs.append(file_name)
-                self.playlist.addItem(title)
+                self.playlist.addItem(f"{artist} - {title}")
         if self.current_song not in self.playlist_songs:
             self.current_song = None
             self.stop()
@@ -424,6 +495,9 @@ class MP3Player(QMainWindow):
         self.seek_slider.setValue(0)
         self.current_time_label.setText("0:00")
         self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
+        self.thumbnail_label.setText("No Image")
+        self.title_label.setText("No song selected")
+        self.artist_label.setText("")
 
     def prev_song(self):
         if self.current_song and self.playlist_songs:
@@ -491,13 +565,26 @@ class MP3Player(QMainWindow):
         if self.current_song:
             try:
                 song = MP3(self.current_song)
-                title = song.get("TIT2", os.path.basename(self.current_song))
-                artist = song.get("TPE1", "Unknown Artist")
-                self.title_label.setText(str(title))
-                self.artist_label.setText(str(artist))
                 self.seek_slider.setMaximum(int(song.info.length))
                 self.total_time_label.setText(self.format_time(song.info.length))
-                self.thumbnail_label.setText("No Image")
+                # all_songs에서 정보 가져오기
+                for song_path, title, artist, thumbnail_url in self.all_songs:
+                    if song_path == self.current_song:
+                        self.title_label.setText(title)
+                        self.artist_label.setText(artist)
+                        if thumbnail_url:
+                            try:
+                                with urllib.request.urlopen(thumbnail_url) as response:
+                                    image_data = response.read()
+                                pixmap = QPixmap()
+                                pixmap.loadFromData(image_data)
+                                scaled_pixmap = pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                                self.thumbnail_label.setPixmap(scaled_pixmap)
+                            except Exception:
+                                self.thumbnail_label.setText("No Image")
+                        else:
+                            self.thumbnail_label.setText("No Image")
+                        break
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load song metadata: {str(e)}")
                 self.current_song = None
@@ -588,10 +675,10 @@ class MP3Player(QMainWindow):
         new_all_songs = []
         for i in range(self.playlist.count()):
             item = self.playlist.item(i)
-            for song_path, title in self.all_songs:
-                if title == item.text():
+            for song_path, title, artist, thumbnail_url in self.all_songs:
+                if f"{artist} - {title}" == item.text():
                     new_order.append(song_path)
-                    new_all_songs.append((song_path, title))
+                    new_all_songs.append((song_path, title, artist, thumbnail_url))
                     break
         self.playlist_songs = new_order
         self.all_songs = new_all_songs
