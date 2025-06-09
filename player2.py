@@ -3,6 +3,7 @@ import os
 import shutil
 import re
 import urllib.request
+import random
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QSlider, QLabel, QListWidget, QFileDialog, QDesktopWidget,
                              QMenuBar, QAction, QLineEdit, QMessageBox, QListWidgetItem)
@@ -31,7 +32,7 @@ class MP3Player(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MP3 Player - AlSong Style")
-        self.setFixedSize(600, 300)
+        self.setFixedSize(500, 250)
         self.center_window()
 
         pygame.mixer.init()
@@ -41,6 +42,8 @@ class MP3Player(QMainWindow):
         self.playlist_songs = []
         self.is_playlist_visible = False
         self.repeat_mode = "off"
+        self.previous_repeat_mode = "off"  # Shuffle 해제 시 복원할 반복 모드 저장
+        self.is_shuffle = False
         self.is_seeking = False
         self.current_position = 0
         self.last_volume = 50
@@ -91,7 +94,7 @@ class MP3Player(QMainWindow):
         self.seek_slider = QSlider(Qt.Horizontal)
         self.seek_slider.setMinimum(0)
         self.seek_slider.setValue(0)
-        self.seek_slider.setFixedWidth(300)
+        self.seek_slider.setFixedWidth(400)  # 재생바 길이 늘림
         self.total_time_label = QLabel("0:00")
         self.seek_layout.addStretch()
         self.seek_layout.addWidget(self.current_time_label)
@@ -118,6 +121,11 @@ class MP3Player(QMainWindow):
         self.volume_slider.setFixedWidth(100)
         self.volume_button = QPushButton()
         self.volume_button.setIcon(self.style().standardIcon(QStyle.SP_MediaVolume))
+        self.repeat_button = QPushButton()
+        self.repeat_button.setFixedWidth(60)
+        self.repeat_button.clicked.connect(self.cycle_repeat_mode)
+        # 초기 상태 설정: 반복 끄기
+        self.repeat_button.setIcon(QIcon("images/repeat_off.png"))
         self.control_layout.addStretch()
         self.control_layout.addWidget(self.prev_button)
         self.control_layout.addWidget(self.play_button)
@@ -126,6 +134,7 @@ class MP3Player(QMainWindow):
         self.control_layout.addWidget(self.playlist_button)
         self.control_layout.addWidget(self.volume_slider)
         self.control_layout.addWidget(self.volume_button)
+        self.control_layout.addWidget(self.repeat_button)
         self.control_layout.addStretch()
         self.main_layout.addLayout(self.control_layout)
 
@@ -148,9 +157,9 @@ class MP3Player(QMainWindow):
         self.playlist.setAcceptDrops(True)
         self.playlist_layout.addWidget(self.playlist)
         self.button_layout = QHBoxLayout()
-        self.add_song_button = QPushButton("Add Song")
+        self.add_song_button = QPushButton("Add")
         self.add_song_button.setIcon(self.style().standardIcon(QStyle.SP_FileDialogNewFolder))
-        self.delete_song_button = QPushButton("Delete Song")
+        self.delete_song_button = QPushButton("Delete")
         self.delete_song_button.setIcon(self.style().standardIcon(QStyle.SP_TrashIcon))
         self.button_layout.addWidget(self.add_song_button)
         self.button_layout.addWidget(self.delete_song_button)
@@ -247,23 +256,20 @@ class MP3Player(QMainWindow):
             if match:
                 parts = match.groups()
                 if len(parts) == 2:
-                    # 첫 번째 그룹이 아티스트, 두 번째가 곡명 또는 반대일 수 있음
                     artist, song = parts
                     artist = artist.strip()
                     song = song.strip()
-                    # 패턴에 따라 아티스트와 곡명 순서 조정
                     if pattern == r'^(.*?)\s*by\s*(.*?)$' or pattern == r'^(.*?)\s*\((.*?)\)$':
                         artist, song = song, artist
                     if artist and song:
                         return song, artist
-        # 파싱 실패 시 전체 제목을 곡명으로, 아티스트는 기본값
         return title.strip(), "Unknown Artist"
 
     def setup_menus(self):
         file_menu = self.menu_bar.addMenu("파일")
         open_action = QAction("열기", self)
         open_action.setShortcut("Ctrl+O")
-        open_action.triggered.connect(self.add_song)
+        open_action.triggered.connect(self.open_song)
         file_menu.addAction(open_action)
         add_action = QAction("추가", self)
         add_action.setShortcut("Ctrl+A")
@@ -334,11 +340,11 @@ class MP3Player(QMainWindow):
             self.playlist_widget.hide()
             self.youtube_results.hide()
             self.is_playlist_visible = False
-            self.setFixedSize(600, 300)
+            self.setFixedSize(500, 250)
         else:
             self.playlist_widget.show()
             self.is_playlist_visible = True
-            self.setFixedSize(600, 700)
+            self.setFixedSize(500, 700)
 
     def search_youtube(self):
         if not self.youtube:
@@ -378,9 +384,7 @@ class MP3Player(QMainWindow):
         video_url = item.text().split("[")[-1].rstrip("]")
         full_title = item.text().split("[")[0].strip()
         thumbnail_url = item.data(Qt.UserRole)
-        # 제목 파싱
         title, artist = self._parse_title(full_title)
-        # Sanitize title to avoid invalid filename characters
         sanitized_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).strip()
         threading.Thread(target=self.download_youtube_thread, args=(video_url, sanitized_title, title, artist, thumbnail_url), daemon=True).start()
 
@@ -401,13 +405,13 @@ class MP3Player(QMainWindow):
             mp3_path = os.path.join(self.download_dir, f"{sanitized_title}.mp3")
             if os.path.exists(mp3_path):
                 QApplication.postEvent(self, CustomEvent(f"Downloaded and added: {title}"))
-                self.add_downloaded_song(mp3_path, title, artist, thumbnail_url)
+                self.add_downloaded_song(mp3_path, title, artist, thumbnail_url, play_immediately=True)
             else:
                 QApplication.postEvent(self, CustomEvent(f"Failed to find downloaded song: {title}"))
         except Exception as e:
             QApplication.postEvent(self, CustomEvent(f"Error downloading {title}: {str(e)}"))
 
-    def add_downloaded_song(self, file_name, title, artist, thumbnail_url=None):
+    def add_downloaded_song(self, file_name, title, artist, thumbnail_url=None, play_immediately=False):
         self.playlist_songs.append(file_name)
         self.all_songs.append((file_name, title, artist, thumbnail_url))
         self.playlist.addItem(f"{artist} - {title}")
@@ -423,10 +427,14 @@ class MP3Player(QMainWindow):
                 self.thumbnail_label.setText("No Image")
         else:
             self.thumbnail_label.setText("No Image")
-        self.update_song_info()
+        if play_immediately:
+            self.current_song = file_name
+            self.play_song()
+        else:
+            self.update_song_info()
 
     def add_song(self):
-        file_names, _ = QFileDialog.getOpenFileNames(self, "Open MP3 Files", "", "MP3 Files (*.mp3)")
+        file_names, _ = QFileDialog.getOpenFileNames(self, "Add MP3 Files", "", "MP3 Files (*.mp3)")
         for file_name in file_names:
             if file_name:
                 self.playlist_songs.append(file_name)
@@ -438,8 +446,45 @@ class MP3Player(QMainWindow):
                     self.playlist.addItem(f"{artist} - {title}")
                 except Exception as e:
                     QMessageBox.critical(self, "Error", f"Failed to add song: {str(e)}")
-        if file_names:
+        if file_names and not self.is_playing:
             self.update_song_info()
+
+    def open_song(self):
+        file_names, _ = QFileDialog.getOpenFileNames(self, "Open MP3 Files", "", "MP3 Files (*.mp3)")
+        first_song = None
+        for file_name in file_names:
+            if file_name:
+                self.playlist_songs.append(file_name)
+                try:
+                    song = MP3(file_name)
+                    title = str(song.get("TIT2", os.path.basename(file_name)))
+                    artist = str(song.get("TPE1", "Unknown Artist"))
+                    self.all_songs.append((file_name, title, artist, None))
+                    self.playlist.addItem(f"{artist} - {title}")
+                    if not first_song:
+                        first_song = file_name
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to add song: {str(e)}")
+        if first_song:
+            self.current_song = first_song
+            self.play_song()
+
+    def play_song(self):
+        if self.current_song and self.current_song in self.playlist_songs:
+            try:
+                pygame.mixer.music.load(self.current_song)
+                pygame.mixer.music.set_volume(self.volume_slider.value() / 100)
+                pygame.mixer.music.play(start=0)
+                self.is_playing = True
+                self.current_position = 0
+                self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+                self.update_song_info()
+            except pygame.error as e:
+                QMessageBox.critical(self, "Error", f"Failed to play song: {str(e)}")
+                self.stop()
+        else:
+            QMessageBox.warning(self, "Warning", "No song selected.")
+            self.stop()
 
     def delete_song(self):
         selected_items = self.playlist.selectedItems()
@@ -470,7 +515,7 @@ class MP3Player(QMainWindow):
 
     def play_pause(self):
         if self.playlist_songs:
-            if not self.current_song:
+            if not self.current_song or self.current_song not in self.playlist_songs:
                 self.current_song = self.playlist_songs[0]
             if not self.is_playing:
                 try:
@@ -504,62 +549,45 @@ class MP3Player(QMainWindow):
             index = self.playlist_songs.index(self.current_song)
             if index > 0:
                 self.current_song = self.playlist_songs[index - 1]
-                try:
-                    pygame.mixer.music.load(self.current_song)
-                    pygame.mixer.music.set_volume(self.volume_slider.value() / 100)
-                    pygame.mixer.music.play(start=0)
-                    self.is_playing = True
-                    self.current_position = 0
-                    self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
-                    self.update_song_info()
-                except pygame.error as e:
-                    QMessageBox.critical(self, "Error", f"Failed to play song: {str(e)}")
-                    self.stop()
+                self.play_song()
+            elif self.repeat_mode == "all":
+                self.current_song = self.playlist_songs[-1]
+                self.play_song()
 
     def next_song(self):
-        if self.current_song and self.playlist_songs:
-            index = self.playlist_songs.index(self.current_song)
+        if not self.playlist_songs:
+            QMessageBox.warning(self, "Warning", "No songs in playlist.")
+            return
+        if not self.current_song or self.current_song not in self.playlist_songs:
+            self.current_song = self.playlist_songs[0]
+            self.play_song()
+            return
+        index = self.playlist_songs.index(self.current_song)
+        if self.is_shuffle:
+            # 무작위 재생 모드: 무작위로 다음 곡 선택
+            new_index = random.randint(0, len(self.playlist_songs) - 1)
+            while new_index == index and len(self.playlist_songs) > 1:
+                new_index = random.randint(0, len(self.playlist_songs) - 1)
+            self.current_song = self.playlist_songs[new_index]
+            self.play_song()
+        else:
+            # Shuffle이 꺼져 있는 경우
             if index < len(self.playlist_songs) - 1:
                 self.current_song = self.playlist_songs[index + 1]
-                try:
-                    pygame.mixer.music.load(self.current_song)
-                    pygame.mixer.music.set_volume(self.volume_slider.value() / 100)
-                    pygame.mixer.music.play(start=0)
-                    self.is_playing = True
-                    self.current_position = 0
-                    self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
-                    self.update_song_info()
-                except pygame.error as e:
-                    QMessageBox.critical(self, "Error", f"Failed to play song: {str(e)}")
-                    self.stop()
+                self.play_song()
             elif self.repeat_mode == "all":
+                # 전체 반복 모드: 마지막 곡에서 첫 곡으로
                 self.current_song = self.playlist_songs[0]
-                try:
-                    pygame.mixer.music.load(self.current_song)
-                    pygame.mixer.music.set_volume(self.volume_slider.value() / 100)
-                    pygame.mixer.music.play(start=0)
-                    self.is_playing = True
-                    self.current_position = 0
-                    self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
-                    self.update_song_info()
-                except pygame.error as e:
-                    QMessageBox.critical(self, "Error", f"Failed to play song: {str(e)}")
-                    self.stop()
+                self.play_song()
+            else:
+                # 반복 끄기 또는 한곡 반복: 마지막 곡이면 다음 곡 없음
+                QMessageBox.warning(self, "Warning", "No next song available.")
+                self.stop()
 
     def play_selected_song(self, item):
         index = self.playlist.row(item)
         self.current_song = self.playlist_songs[index]
-        try:
-            pygame.mixer.music.load(self.current_song)
-            pygame.mixer.music.set_volume(self.volume_slider.value() / 100)
-            pygame.mixer.music.play(start=0)
-            self.is_playing = True
-            self.current_position = 0
-            self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
-            self.update_song_info()
-        except pygame.error as e:
-            QMessageBox.critical(self, "Error", f"Failed to play song: {str(e)}")
-            self.stop()
+        self.play_song()
 
     def update_song_info(self):
         if self.current_song:
@@ -567,7 +595,6 @@ class MP3Player(QMainWindow):
                 song = MP3(self.current_song)
                 self.seek_slider.setMaximum(int(song.info.length))
                 self.total_time_label.setText(self.format_time(song.info.length))
-                # all_songs에서 정보 가져오기
                 for song_path, title, artist, thumbnail_url in self.all_songs:
                     if song_path == self.current_song:
                         self.title_label.setText(title)
@@ -662,10 +689,16 @@ class MP3Player(QMainWindow):
                         pygame.mixer.music.set_volume(self.volume_slider.value() / 100)
                         pygame.mixer.music.play(start=0)
                         self.current_position = 0
-                    elif self.repeat_mode == "all" and self.playlist_songs:
+                    elif self.repeat_mode == "all":
                         self.next_song()
-                    else:
-                        self.stop()
+                    elif self.is_shuffle:
+                        self.next_song()
+                    else:  # repeat_mode == "off"
+                        index = self.playlist_songs.index(self.current_song) if self.current_song in self.playlist_songs else -1
+                        if index < len(self.playlist_songs) - 1:
+                            self.next_song()
+                        else:
+                            self.stop()
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to check song duration: {str(e)}")
                 self.stop()
@@ -686,16 +719,38 @@ class MP3Player(QMainWindow):
     def cycle_repeat_mode(self):
         if self.repeat_mode == "off":
             self.repeat_mode = "one"
+            self.previous_repeat_mode = "one"
             self.repeat_action.setText("한곡 반복")
+            self.repeat_button.setIcon(QIcon("images/repeat_one.png"))
         elif self.repeat_mode == "one":
             self.repeat_mode = "all"
+            self.previous_repeat_mode = "all"
             self.repeat_action.setText("전체 반복")
+            self.repeat_button.setIcon(QIcon("images/repeat_all.png"))
         else:
             self.repeat_mode = "off"
+            self.previous_repeat_mode = "off"
             self.repeat_action.setText("반복 끄기")
+            self.repeat_button.setIcon(QIcon("images/repeat_off.png"))
 
     def toggle_shuffle(self):
-        pass
+        self.is_shuffle = not self.is_shuffle
+        if self.is_shuffle:
+            self.previous_repeat_mode = self.repeat_mode  # Shuffle 활성화 전 반복 모드 저장
+            self.repeat_mode = "off"  # Shuffle 중에는 반복 비활성화
+            self.repeat_action.setText("무작위 재생")
+            self.repeat_button.setIcon(QIcon("images/shuffle.png"))
+        else:
+            self.repeat_mode = self.previous_repeat_mode  # Shuffle 해제 시 이전 반복 모드 복원
+            if self.repeat_mode == "off":
+                self.repeat_action.setText("반복 끄기")
+                self.repeat_button.setIcon(QIcon("images/repeat_off.png"))
+            elif self.repeat_mode == "one":
+                self.repeat_action.setText("한곡 반복")
+                self.repeat_button.setIcon(QIcon("images/repeat_one.png"))
+            else:  # self.repeat_mode == "all"
+                self.repeat_action.setText("전체 반복")
+                self.repeat_button.setIcon(QIcon("images/repeat_all.png"))
 
     def adjust_volume(self, delta):
         current_volume = self.volume_slider.value()
